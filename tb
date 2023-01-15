@@ -1,0 +1,288 @@
+#!/bin/bash
+
+# Script for the management of the Cygwin installation and maintenance.
+#
+# The script provides access to several commands. These commands can
+# be called with (optional) specific arguments.
+#
+# Author: Andreas Kellers
+# Date: 2022-11-30
+
+
+# TODO Extend install/remove with --interactive option
+# TODO Check usage of 'run' in tb_setup function
+#
+# DONE Generalise cygcheck functions (check,list,show)
+# DONE Generalise setup functions (install, remove)
+# DONE Support options (long and short)
+# - DONE verbosity
+# - DONE debugging
+# DONE Refine while loop:
+# - DONE differentiate between commands (just once) and arguments
+# - DONE list command (prune? autoremove?)
+
+#
+# General variables
+#
+TB_BASENAME=$(basename $0)	# Basename of this script for logging purposes
+TB_CMD=""			# Command to be executed
+tb_args=""			# Arguments for the command
+tb_debug=                       # Debugging option
+tb_verbose=                     # Verbosity option
+tb_interactive=                 # Interactive option
+
+# Usage command
+function tb_usage() {
+    echo "${TB_BASENAME}: Toolbox for Cygwin installation and maintenance."
+    echo ""
+    echo "USAGE: ${TB_BASENAME} [options] command <arguments>"
+    echo ""
+    echo "OPTIONS:"
+    echo "  -d, --debug               Run command in debug mode"
+    echo "  -v, --verbose             Produce more verbose output"
+    echo "  -i, --interactive         Run install/remove commands interactive"
+    echo "  -h, --help                Return this help"
+    echo ""
+    echo "COMMANDS:"
+    echo "  search [REGEX]            Search available packages matching REGEX"
+    echo "                            (or all packages if none is given)"
+    echo "  describe PACKAGE          Describe package(s) incl. version and dependencies"
+    echo ""
+    echo "  install PACKAGE           Install package(s)"
+    echo "  remove PACKAGE            Remove package(s)"
+    echo ""
+    echo "  check [PACKAGE]           Show installed version of package and verify integrity"
+    echo "                            (or for all installed packages if none is given)"
+    echo "  dump [PACKAGE]            Just list installed package(s)"
+    echo "  list [PACKAGE]            List contents of package(s)"
+    echo "                            (or all if none is given)"
+    echo "  find FILE                 Find the package to which FILE belongs"
+    echo "  query REGEXP              Search for REGEXP in cygwin.com packe repository"
+    echo "                            (requires internet connectivity)"
+    echo "  usage|help                Show this information"
+    exit 0
+}
+
+# Helper function for DEBUG, INFO, WARN, ERROR ...
+#
+function tb_log () {
+    case $1 in
+	DEBUG)
+	    if [ -n "${tb_debug}" ]; then
+	       echo -n "[$1] ${TB_BASENAME}: ";
+	       shift
+	       echo $*
+	    fi
+	    ;;
+	INFO)
+	    if [ -n "${tb_verbose}" ]; then
+	       echo -n "[$1] ${TB_BASENAME}: ";
+	       shift
+	       echo $*
+	    fi
+	    ;;
+	WARN)
+	    echo -n "[$1] ${TB_BASENAME}: ";
+	    shift
+	    echo $*
+	    ;;
+	ERROR)
+	    echo -n "[$1] ${TB_BASENAME}: ";
+	    shift
+	    echo $*
+	    exit 1
+	    ;;
+	*)
+	    tb_log WARN "'tb_log' called with unknown or missing log level"
+	    ;;
+    esac
+}
+
+#
+# Setup command
+#
+# last settings are stored in /ect/setup/setup.rc"
+tb_setup_dir="/cygdrive/c/Toolbox/Cygwin"
+tb_setup_prg="${tb_setup_dir}/setup-x86_64.exe"
+tb_setup_site="http%3a%2f%2fftp-stud.hs-esslingen.de%2fpub%2fMirrors%2fsources.redhat.com%2fcygwin%2f"
+tb_setup_args+="--arch x86_64 "
+tb_setup_args+="--disable-buggy-antivirus "
+tb_setup_args+="--local-install "
+tb_setup_args+="--local-package-dir `cygpath --windows ${tb_setup_dir}/${tb_setup_site} | sed -e 's/\\\\/\\\\\\\\/g'` "
+tb_setup_args+="--no-verify "
+tb_setup_args+="--no-version-check "
+tb_setup_args+="--no-desktop "
+tb_setup_args+="--no-shortcuts "
+tb_setup_args+="--no-startmenu "
+tb_setup_args+="--no-admin "
+
+tb_setup_cmd=""
+function tb_setup() {
+    case $1 in
+	install)
+	    tb_setup_cmd="--packages"
+	    ;;
+	remove)
+	    tb_setup_cmd="--remove-packages"
+	    ;;
+	*)
+	    tb_log ERROR "'tb_setup' called with unknown or missing command!"
+    esac
+    if [ -z "${tb_args}" ]; then
+	tb_log ERROR "'$1' command requires PACKAGE argument(s)!"
+    else
+	if [ -z "${tb_interactive}" ]; then
+	    tb_setup_args+="--quiet-mode "
+	fi
+	if [ -n "${tb_verbose}" ]; then
+	    tb_setup_args+="--verbose "
+	fi
+	if [ "$1" = "install" ]; then
+	    tb_log INFO "Installing packages '${tb_args}' ..."
+	else
+	    tb_log INFO "Removing packages '${tb_args}' ..."
+	fi
+	tb_log DEBUG "Running 'run ${tb_setup_prg} ${tb_setup_args} ${tb_setup_cmd} ${tb_args}'"
+	${tb_setup_prg} ${tb_setup_args} ${tb_setup_cmd} ${tb_args} | \
+	    grep --invert-match --regex "Extracting from file" | \
+	    sed "s/@/ /g"
+    fi
+}
+
+#
+# Cygcheck command
+#
+function tb_cygcheck() {
+    case $1 in
+	check)
+	    tb_cygcheck_cmd="--check"
+	    tb_cygcheck_msg="Checking versions and integrity of installed packages ${tb_args}..."
+	    tb_cygcheck_num=2
+	    ;;
+	dump)
+	    tb_cygcheck_cmd="--check --dump-only"
+	    tb_cygcheck_msg="Dumping versions of installed packages ${tb_args}..."
+	    tb_cygcheck_num=2
+	    ;;
+	list)
+	    tb_cygcheck_cmd="--list-package"
+	    tb_cygcheck_msg="List contents of installed packages ${tb_args}..."
+	    tb_cygcheck_num=0
+	    ;;
+	find)
+	    tb_cygcheck_cmd="--find-package"
+	    if [ -z "${tb_args}" ]; then
+		tb_log ERROR "'tb find' requires FILE argument. See 'tb usage'"
+	    fi
+	    tb_cygcheck_msg="Find package to which '${tb_args}' belongs..."
+	    tb_cygcheck_num=0
+	    ;;
+	query)
+	    tb_cygcheck_cmd="--package-query"
+	    if [ -z "${tb_args}" ]; then
+		tb_log ERROR "'tb query' requires REGEXP argument. See 'tb usage'"
+	    fi
+	    tb_cygcheck_msg="Query cygwin.com repository with regular expression '${tb_args}'..."
+	    tb_cygcheck_num=0
+	    ;;
+	*)
+	    tb_log ERROR "'tb_cygcheck' called with unknown or missing command!"
+	    ;;
+    esac
+    tb_log INFO "${tb_cygcheck_msg}"
+    tb_log DEBUG "Executing: 'cygcheck ${tb_cygcheck_cmd} ${tb_args}'"
+    cygcheck ${tb_cygcheck_cmd} ${tb_args} | \
+	sed "s/^/  /g" | \
+	tail --lines=+${tb_cygcheck_num} # to ignore Cygwin header line
+    exit 0
+}
+
+#
+# Search command
+#
+tb_setup_ini="${tb_setup_dir}/${tb_setup_site}/x86_64/setup.ini"
+function tb_search() {
+    echo "Searching packages matching '${tb_args}':"
+    grep "^@ " ${tb_setup_ini} | \
+	sed "s/@/ /g" | \
+	grep "${tb_args}"
+}
+
+#
+# Describe command
+#
+function tb_describe() {
+    if [ -z ${tb_args} ]; then
+	tb_log ERROR "'describe' requires PACKAGE argument(s)!"
+    else
+	echo "Describing packages '${tb_args}' ..."
+	for pkg in ${tb_args}; do
+	    cat ${tb_setup_ini} | sed -n "/^@ ${pkg}$/,/^version: /p" | \
+		sed -e "s/^[sl]desc: //g" -e "s/@ //g"  -e "s/^/  /"
+	    echo
+	done
+    fi
+}
+
+#
+# Main function
+#
+if [ $# -eq 0 ]; then
+    tb_usage
+else
+    while [ -n "$1" ]
+    do
+	case $1 in
+	    # parse setup commands
+	    install|remove)
+		tb_log DEBUG "parsed setup command '$1'"
+		TB_CMD="setup $1";
+		shift ;;
+	    # parse cygcheck commands
+	    check|dump|list|find|query)
+		tb_log DEBUG "parsed command '$1'"
+		TB_CMD="cygcheck $1";
+		shift ;;
+	    # parse commands on setup.ini
+	    search|describe)
+		tb_log DEBUG "parsed command '$1'"
+		TB_CMD=$1;
+		shift ;;
+	    # parse help message
+	    usage|help|-h|--help)
+		tb_log DEBUG "parsed command '$1'"
+		tb_usage
+		;;
+	    # parse options
+	    -d|--debug)
+		tb_log DEBUG "parsed option '$1'"
+		tb_debug="Y"
+		shift ;;
+	    -v|--verbose)
+		tb_log DEBUG "parsed option '$1'"
+		tb_verbose="Y"
+		shift ;;
+	    -i|--interactive)
+		tb_log DEBUG "parsed option '$1'"
+		tb_interactive="Y"
+		shift ;;
+	    # remaining arguments
+	    *) tb_args+="$1 ";
+	       tb_log DEBUG "parsed argument '$1'"
+	       shift ;;
+	esac
+    done
+    tb_args=$(echo ${tb_args} | xargs) # trim argument string
+    tb_log DEBUG "command '${TB_CMD}'"
+    tb_log DEBUG "arguments '${tb_args}'"
+    tb_log DEBUG "debugging option '${tb_debug}'"
+    tb_log DEBUG "verbosity option '${tb_verbose}'"
+    tb_log DEBUG "interactive option '${tb_interacitve}'"
+
+    if [ -z "${TB_CMD}" ]; then
+	tb_log ERROR "Command missing or unknown. See 'tb usage'."
+	exit -1
+    else
+	tb_${TB_CMD} ${tb_args}
+    fi
+fi
